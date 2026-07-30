@@ -2,6 +2,7 @@ import re, os, gzip
 from selenium import webdriver
 from selenium.webdriver import Keys
 from selenium.webdriver.edge.service import Service
+from webdriver_manager.microsoft import EdgeChromiumDriverManager # 自动下载对应版本的浏览器驱动
 from selenium.common.exceptions import NoSuchElementException
 from selenium.common.exceptions import SessionNotCreatedException
 from selenium.webdriver.common.by import By
@@ -13,7 +14,8 @@ from fastapi import FastAPI, Header, Request, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 import threading, hashlib, secrets
 
-service = Service(executable_path=r'C:\WebDriver\edge\msedgedriver.exe')
+# service = Service(executable_path=r'C:\WebDriver\edge\msedgedriver.exe')
+service = Service(EdgeChromiumDriverManager().install())
 options = webdriver.EdgeOptions()
 off_ui = False
 off_ui_input = input('是否显示游览器[默认回车不显示,输入任意则显示]:')
@@ -236,6 +238,60 @@ def remove_token(token: str):
     _valid_tokens.discard(token)
 
 
+def get_cookie_expiry_summary():
+    cookies = driver.get_cookies()
+    now_ts = int(time.time())
+
+    total = len(cookies)
+    session_cookie_count = 0
+    expired_cookie_count = 0
+    with_expiry_count = 0
+    earliest_expiry_ts = None
+
+    for cookie in cookies:
+        expiry = cookie.get('expiry')
+        if expiry is None:
+            session_cookie_count += 1
+            continue
+
+        try:
+            exp_ts = int(expiry)
+        except Exception:
+            continue
+
+        with_expiry_count += 1
+        if exp_ts <= now_ts:
+            expired_cookie_count += 1
+        else:
+            if earliest_expiry_ts is None or exp_ts < earliest_expiry_ts:
+                earliest_expiry_ts = exp_ts
+
+    earliest_expiry_text = None
+    seconds_left = None
+    hours_left = None
+    expiring_soon = False
+
+    if earliest_expiry_ts is not None:
+        dt = datetime.fromtimestamp(earliest_expiry_ts)
+        earliest_expiry_text = dt.strftime('%Y-%m-%d %H:%M:%S')
+        seconds_left = max(0, earliest_expiry_ts - now_ts)
+        hours_left = round(seconds_left / 3600, 2)
+        expiring_soon = seconds_left <= 24 * 3600
+
+    return {
+        'total_cookie_count': total,
+        'with_expiry_count': with_expiry_count,
+        'session_cookie_count': session_cookie_count,
+        'expired_cookie_count': expired_cookie_count,
+        'earliest_expiry_time': earliest_expiry_text,
+        'earliest_expiry_timestamp': earliest_expiry_ts,
+        'seconds_left': seconds_left,
+        'hours_left': hours_left,
+        'expiring_soon_24h': expiring_soon,
+        'note': '仅供参考，实际登录状态仍受平台风控和会话策略影响'
+    }
+
+
 def require_auth(authorization: str = Header(None)):
     if not authorization or not authorization.startswith('Bearer '):
         return {'code': 401, 'data': '未授权'}
@@ -246,7 +302,96 @@ def require_auth(authorization: str = Header(None)):
 
 
 # 定时任务存储
+TASKS_FILE = 'scheduled_tasks.json'
 scheduled_tasks = {}  # 格式: {任务ID: job对象}
+scheduled_task_configs = {}  # 格式: {任务ID: {time, name, text}}
+
+
+def save_scheduled_tasks():
+    try:
+        tasks = []
+        for task_id, cfg in scheduled_task_configs.items():
+            tasks.append({
+                'task_id': task_id,
+                'time': cfg.get('time'),
+                'name': cfg.get('name'),
+                'text': cfg.get('text')
+            })
+        with open(TASKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f'⚠️ 保存定时任务失败: {e}')
+
+
+def run_scheduled_task(task_id: str):
+    cfg = scheduled_task_configs.get(task_id)
+    if not cfg:
+        return
+
+    if not init or not Login_is_bool or 'douyin' not in globals():
+        print(f'⚠️ 跳过任务 {task_id}: 浏览器未初始化或未登录')
+        return
+
+    name = cfg.get('name')
+    text = cfg.get('text', '')
+    out = douyin.Send_Frinder(name, text)
+    if not out or not out.is_bool:
+        err = out.string if out else '未知错误'
+        print(f'⚠️ 定时任务执行失败 {task_id}: {err}')
+
+
+def register_scheduled_task(task_id: str, play_time: str, name: str, text: str):
+    # 确保同任务不会被重复注册
+    old_job = scheduled_tasks.get(task_id)
+    if old_job:
+        schedule.cancel_job(old_job)
+
+    scheduled_task_configs[task_id] = {
+        'time': play_time,
+        'name': name,
+        'text': text
+    }
+    job = schedule.every().day.at(play_time).do(run_scheduled_task, task_id)
+    scheduled_tasks[task_id] = job
+
+
+def load_scheduled_tasks():
+    if not os.path.exists(TASKS_FILE):
+        return
+
+    try:
+        with open(TASKS_FILE, 'r', encoding='utf-8') as f:
+            tasks = json.load(f)
+    except Exception as e:
+        print(f'⚠️ 读取定时任务失败: {e}')
+        return
+
+    if not isinstance(tasks, list):
+        print('⚠️ 定时任务文件格式错误，已跳过加载')
+        return
+
+    loaded_count = 0
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+
+        name = str(item.get('name', '')).strip()
+        if not name:
+            continue
+
+        play_time = format_time(str(item.get('time', '22:00')))
+        text = item.get('text')
+        msg = AiqingGongyu_text() if text is None else str(text)
+        task_id = f"{play_time}_{name}"
+
+        register_scheduled_task(task_id, play_time, name, msg)
+        loaded_count += 1
+
+    if loaded_count:
+        print(f'✅ 已恢复 {loaded_count} 个定时任务')
+
+
+load_scheduled_tasks()
 
 
 # 定时线程
@@ -377,6 +522,25 @@ def GetLogin(authorization: str = Header(None)):
     if auth_err:
         return auth_err
     return {'code': 200, 'data': 'Yes' if Login_is_bool else 'No'}
+
+
+@app.get('/Api/Cookie/Expiry')  # 获取Cookie有效期信息
+def GetCookieExpiry(authorization: str = Header(None)):
+    auth_err = require_auth(authorization)
+    if auth_err:
+        return auth_err
+
+    if not init:
+        return {'code': 400, 'data': '浏览器未初始化'}
+
+    if not Login_is_bool:
+        return {'code': 400, 'data': '未登录'}
+
+    try:
+        summary = get_cookie_expiry_summary()
+        return {'code': 200, 'data': summary}
+    except Exception as e:
+        return {'code': 500, 'data': f'获取Cookie有效期失败: {str(e)}'}
 
 
 @app.get('/Api/login/Init/GetLoginPng')  # 获取登录扫码
@@ -565,7 +729,7 @@ def add_time(time: str, name: str, text: str = None, authorization: str = Header
     if auth_err:
         return auth_err
     # 检查是否已存在该好友的定时任务
-    for task_id, job in scheduled_tasks.items():
+    for task_id in scheduled_task_configs.keys():
         if task_id.endswith(f"_{name}"):
             return {'code': 400, 'data': f'好友 {name} 已有定时任务，请先删除或修改'}
 
@@ -573,11 +737,10 @@ def add_time(time: str, name: str, text: str = None, authorization: str = Header
     if temp.is_bool:
         play_time = format_time(time)
         msg = AiqingGongyu_text() if text == None else text
-        # 添加定时任务并保存job对象
-        job = schedule.every().day.at(play_time).do(douyin.Send_Frinder, name, msg)
         # 生成唯一任务ID
         task_id = f"{play_time}_{name}"
-        scheduled_tasks[task_id] = job
+        register_scheduled_task(task_id, play_time, name, msg)
+        save_scheduled_tasks()
         return {'code': 200, 'data': f'已添加定时任务: {play_time}', 'task_id': task_id}
     else:
         return {'code': 404, 'data': temp.string}
@@ -589,10 +752,14 @@ def del_time(task_id: str, authorization: str = Header(None)):
     if auth_err:
         return auth_err
     """根据任务ID删除定时任务"""
-    if task_id in scheduled_tasks:
-        job = scheduled_tasks[task_id]
-        schedule.cancel_job(job)
-        del scheduled_tasks[task_id]
+    if task_id in scheduled_tasks or task_id in scheduled_task_configs:
+        job = scheduled_tasks.get(task_id)
+        if job:
+            schedule.cancel_job(job)
+            del scheduled_tasks[task_id]
+        if task_id in scheduled_task_configs:
+            del scheduled_task_configs[task_id]
+        save_scheduled_tasks()
         return {'code': 200, 'data': f'已删除任务: {task_id}'}
     else:
         return {'code': 404, 'data': '任务ID不存在'}
@@ -606,7 +773,7 @@ def edit_time(name: str, new_time: str, authorization: str = Header(None)):
     """修改指定好友的定时任务时间"""
     # 查找该好友的现有任务
     old_task_id = None
-    for task_id, job in scheduled_tasks.items():
+    for task_id in scheduled_task_configs.keys():
         if task_id.endswith(f"_{name}"):
             old_task_id = task_id
             break
@@ -615,8 +782,9 @@ def edit_time(name: str, new_time: str, authorization: str = Header(None)):
         return {'code': 404, 'data': f'好友 {name} 没有定时任务'}
 
     # 取消旧任务
-    old_job = scheduled_tasks[old_task_id]
-    schedule.cancel_job(old_job)
+    old_job = scheduled_tasks.get(old_task_id)
+    if old_job:
+        schedule.cancel_job(old_job)
 
     # 解析旧任务信息
     parts = old_task_id.split('_', 1)
@@ -624,13 +792,19 @@ def edit_time(name: str, new_time: str, authorization: str = Header(None)):
 
     # 创建新任务
     new_play_time = format_time(new_time)
-    msg = AiqingGongyu_text()  # 获取新的名言
-    new_job = schedule.every().day.at(new_play_time).do(douyin.Send_Frinder, name, msg)
+    old_cfg = scheduled_task_configs.get(old_task_id, {})
+    msg = old_cfg.get('text')
+    if msg is None:
+        msg = AiqingGongyu_text()
 
     # 生成新任务ID并替换
     new_task_id = f"{new_play_time}_{name}"
-    scheduled_tasks[new_task_id] = new_job
-    del scheduled_tasks[old_task_id]
+    register_scheduled_task(new_task_id, new_play_time, name, msg)
+    if old_task_id in scheduled_tasks:
+        del scheduled_tasks[old_task_id]
+    if old_task_id in scheduled_task_configs:
+        del scheduled_task_configs[old_task_id]
+    save_scheduled_tasks()
 
     return {
         'code': 200,
@@ -648,17 +822,15 @@ def get_time_list(authorization: str = Header(None)):
         return auth_err
     """获取当前所有定时任务列表"""
     tasks = []
-    for task_id, job in scheduled_tasks.items():
-        # 解析任务ID获取信息
-        parts = task_id.split('_', 1)
-        if len(parts) == 2:
-            time_str, name = parts
-            tasks.append({
-                'task_id': task_id,
-                'time': time_str,
-                'name': name,
-                'next_run': str(job.next_run) if job.next_run else None
-            })
+    for task_id, cfg in scheduled_task_configs.items():
+        job = scheduled_tasks.get(task_id)
+        tasks.append({
+            'task_id': task_id,
+            'time': cfg.get('time'),
+            'name': cfg.get('name'),
+            'text': cfg.get('text'),
+            'next_run': str(job.next_run) if job and job.next_run else None
+        })
     return {'code': 200, 'data': {'count': len(tasks), 'tasks': tasks}}
 
 

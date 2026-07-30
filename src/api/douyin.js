@@ -85,6 +85,9 @@ export const getInitStatus = () => api.get('/Api/GetInit')
 // 获取登录状态
 export const getLoginStatus = () => api.get('/Api/GetLogin')
 
+// 获取Cookie有效期信息
+export const getCookieExpiry = () => api.get('/Api/Cookie/Expiry')
+
 // 扫码登录确认
 export const pnglogin = () => api.get('/Api/Pnglogin')
 

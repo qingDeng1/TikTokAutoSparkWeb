@@ -182,6 +182,41 @@
     </div>
   </el-card>
 
+  <el-card style="margin-top: 20px">
+    <template #header>
+      <div class="card-header cookie-header">
+        <span>Cookie有效期</span>
+        <el-button :icon="Refresh" text @click="handleRefreshCookieExpiry" :loading="cookieExpiryLoading">
+          刷新
+        </el-button>
+      </div>
+    </template>
+
+    <el-descriptions :column="1" border>
+      <el-descriptions-item label="最早过期时间">
+        {{ cookieExpiry.earliest_expiry_time || '未知（可能为会话Cookie）' }}
+      </el-descriptions-item>
+      <el-descriptions-item label="剩余时长">
+        {{ cookieExpiry.hours_left === null ? '未知' : `${cookieExpiry.hours_left} 小时` }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Cookie统计">
+        共 {{ cookieExpiry.total_cookie_count || 0 }} 个，
+        含过期字段 {{ cookieExpiry.with_expiry_count || 0 }} 个，
+        会话Cookie {{ cookieExpiry.session_cookie_count || 0 }} 个，
+        已过期 {{ cookieExpiry.expired_cookie_count || 0 }} 个
+      </el-descriptions-item>
+    </el-descriptions>
+
+    <el-alert
+      style="margin-top: 12px"
+      :type="cookieExpiry.expiring_soon_24h ? 'warning' : 'success'"
+      :title="cookieExpiry.expiring_soon_24h ? 'Cookie可能在24小时内过期，请尽快重新登录并导出新Cookie' : 'Cookie暂未进入24小时过期窗口'"
+      :description="cookieExpiry.note || '仅供参考，实际登录状态仍受平台会话与风控策略影响'"
+      show-icon
+      :closable="false"
+    />
+  </el-card>
+
   <!-- 调试区域卡片 -->
   <el-card style="margin-top: 20px">
     <template #header>
@@ -207,7 +242,7 @@
 import { ref, onMounted, onActivated } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Key, Refresh, View, Loading, Edit, Lock, Document, SwitchButton, Picture, Message, WarnTriangleFilled } from '@element-plus/icons-vue'
-import { getInitStatus, getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, logout, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin } from '../api/douyin'
+import { getInitStatus, getLoginStatus, initBrowser, getLoginPng, login, getUsername, changePassword, getLastLoginIP, getFriendsList, getCooker, logout, pnglogin, getScrlk, dieLogin, sendVerifyCode, submitVerifyCode, forceLogin, getCookieExpiry } from '../api/douyin'
 import { loginStatus, hasLoaded, setLoginStatus, setFriendsList } from '../stores/browser'
 
 const loginLoading = ref(false)
@@ -240,6 +275,17 @@ const cookieForm = ref({
 const screenshotLoading = ref(false)
 const screenshotUrl = ref('')
 const screenshotPreviewVisible = ref(false)
+const cookieExpiryLoading = ref(false)
+const cookieExpiry = ref({
+  total_cookie_count: 0,
+  with_expiry_count: 0,
+  session_cookie_count: 0,
+  expired_cookie_count: 0,
+  earliest_expiry_time: null,
+  hours_left: null,
+  expiring_soon_24h: false,
+  note: ''
+})
 const phoneDialogVisible = ref(false)
 const phoneLoading = ref(false)
 const codeLoading = ref(false)
@@ -284,10 +330,56 @@ const checkLoginStatus = async () => {
     if (loginStatus.value && !usernameLoaded.value) {
       await fetchUsername()
     }
+    if (loginStatus.value) {
+      await fetchCookieExpiry()
+    }
   } catch (error) {
     loginStatus.value = false
     setLoginStatus(false)
   }
+}
+
+const fetchCookieExpiry = async (showSuccess = false) => {
+  cookieExpiryLoading.value = true
+  try {
+    const res = await getCookieExpiry()
+    if (res.code == 200 || res.code == '200') {
+      cookieExpiry.value = {
+        total_cookie_count: res.data.total_cookie_count ?? 0,
+        with_expiry_count: res.data.with_expiry_count ?? 0,
+        session_cookie_count: res.data.session_cookie_count ?? 0,
+        expired_cookie_count: res.data.expired_cookie_count ?? 0,
+        earliest_expiry_time: res.data.earliest_expiry_time ?? null,
+        hours_left: res.data.hours_left ?? null,
+        expiring_soon_24h: !!res.data.expiring_soon_24h,
+        note: res.data.note || ''
+      }
+      if (showSuccess) {
+        ElMessage.success('Cookie有效期已刷新')
+      }
+    }
+  } catch (error) {
+    cookieExpiry.value = {
+      total_cookie_count: 0,
+      with_expiry_count: 0,
+      session_cookie_count: 0,
+      expired_cookie_count: 0,
+      earliest_expiry_time: null,
+      hours_left: null,
+      expiring_soon_24h: false,
+      note: '获取失败，请确认已登录并初始化浏览器'
+    }
+  } finally {
+    cookieExpiryLoading.value = false
+  }
+}
+
+const handleRefreshCookieExpiry = async () => {
+  if (!loginStatus.value) {
+    ElMessage.warning('请先登录抖音账号')
+    return
+  }
+  await fetchCookieExpiry(true)
 }
 
 const handleRefreshStatus = async () => {
@@ -320,6 +412,7 @@ const handleCheckLogin = async () => {
       await fetchUsername()
       // 登录成功后请求好友列表
       await fetchFriendsList()
+      await fetchCookieExpiry()
     } else {
       ElMessage.warning('未登录，请继续扫码')
     }
@@ -387,6 +480,7 @@ const handleManualLogin = async () => {
       localStorage.removeItem('douyin_username_loaded')
       await fetchUsername()
       await fetchFriendsList()
+      await fetchCookieExpiry()
     } else {
       ElMessage.error('登录失败，Cookie无效')
     }
@@ -534,6 +628,7 @@ const handlePhoneLogin = async () => {
       localStorage.removeItem('douyin_username')
       localStorage.removeItem('douyin_username_loaded')
       await fetchUsername()
+      await fetchCookieExpiry()
     } else {
       ElMessage.error(res.data || '登录失败')
     }
@@ -625,6 +720,12 @@ onActivated(async () => {
 .card-header {
   font-weight: 600;
   font-size: 16px;
+}
+
+.cookie-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .account-section {

@@ -1,0 +1,6 @@
+.venv
+.vscode
+node_modules/
+dist/
+__pycache__/
+scheduled_tasks.json
